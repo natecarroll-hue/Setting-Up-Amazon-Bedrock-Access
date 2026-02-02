@@ -1,0 +1,126 @@
+#Setting Up Amazon Bedrock Access
+To begin, enter Bedrock in the AWS Management Console search box. Then from the results, choose Amazon Bedrock.
+
+On the Amazon Bedrock Overview page, choose View Model catalog.
+
+On the Model catalog page, a full listing of models that you can use with Amazon Bedrock is displayed. You can use the Filters panel to explore the various models. Many of the models, such as Amazon Nova Pro and Anthropic, are available as part of the standard set.
+
+Some of the models in the catalog are available through a subscription pricing model or an open source license.
+
+After you have explored the model catalog, scroll to the end of the side navigation panel and choose Model access. Note that if there are new models available for your account, they are listed next to the Model access link. Requesting access to additional models requires administrative access to your account.
+
+On the What is Model access? page, a list of available foundation models from different providers is provided in the Base models section. To edit the models available in your account, choose Enable all models.
+
+By default, all available models will be selected in the Edit model access panel. If you do not want access to any specific model, clear the checkbox for that model.
+
+Scroll to the end of the page, and choose Next.
+
+On the Review and submit page, you can verify that the desired modification has been selected. If you want to change any of your selections, choose Edit.
+
+Then scroll to the end of the page. The terms for any models that you have chosen are displayed. Review them, and then choose Submit.
+
+After the access request is processed, you can access the additional models. The Access status will change to Access granted.
+
+
+#Configuring Model Parameters in a Playground Session
+On the AWS Management Console, enter Bedrock in the search box. Then from the search results, choose Amazon Bedrock.
+
+From the side navigation panel, under Playgrounds, choose Chat / Text.
+
+In the chat playground panel, choose Select model.
+
+The Select model dialog box appears. From the Categories column, choose a model provider. Then, from the Models column, choose an available model from the provider that you selected. Then choose Apply.
+
+In the Configurations panel of the chat playground, scroll to the Randomness and diversity section.
+
+Leave Temperature and Top P set to their default values. These settings tell the model how creative it can be in its responses. A table that follows the transcript for this video summarizes how these settings affect generated content.
+
+Then, in the Write a prompt input box, enter the following: Write a short story about a day in the life of an extraterrestrial visiting Earth for the first time. You will run the same prompt three more times in this demonstration. Choose Run.
+
+The generated response is displayed. There are two options for copying text from the chat playground. The first is available outside of the prompts and responses. It will copy the entire conversation to your system’s clipboard. The second is available in each individual response panel, and copies that response to the clipboard.
+
+Now leave Temperature set to 1 and adjust Top P to 0.1. Paste the short story prompt into the Write a prompt text box. Then choose Run.
+
+Next, set Temperature to 0.2 and Top P to 0.9. Paste the short story prompt into the text box. Then choose Run.
+
+Now, leave Temperature at 0.2 and set Top P to 0.1. Paste the short story prompt into the text box. Choose Run. You have generated four variations of the short story. The stories generated in this demonstration are available following the transcript of this video. Compare the different versions to see how the settings affected the creativity and predictability of each version.
+
+
+#Creating Your First Amazon Bedrock Knowledge Base
+On the AWS Management Console, enter Bedrock in the search box. Then from the search results, choose Amazon Bedrock.
+
+From the side navigation panel, choose Knowledge Bases.
+
+On the Knowledge Bases page, choose Create. Then choose Knowledge Base with vector store.
+
+On the Provide Knowledge Base details page, enter a name in the Knowledge Base name text box.
+
+Then scroll to the IAM permissions section. Select the radio button next to Create and use a new service role. Verify that Amazon S3 is selected as your data source.
+
+Then, scroll to the end of the page. Choose Next.
+
+Now, on the Configure data source page, enter a name for your data source.
+
+Then, scroll to the Content chunking and parsing section. Leave the settings at their default values. Choose Next.
+
+On the Configure data storage and processing page, from the Embeddings model section, choose Select model.
+
+On the Select model pop-up window, choose a model provider and model. Then choose Apply.
+
+Scroll to the Vector store section. For Vector store creation method, verify that Quick create a new vector store is selected. Then choose Next.
+
+Now, verify the options that you have set.
+
+Scroll to the end of the page. Choose Create Knowledge Base.
+
+After 2 to 3 minutes, the Knowledge Base overview page appears. Choose its name from the Data source panel.
+
+In the Documents section, choose Add documents. Then choose Add document directly.
+
+Enter a document identifier, and verify that Upload is selected. Then choose the Choose file button.
+
+Navigate to where you have the file saved. Select it, then choose Open.
+
+Add additional documents, if you want. Then choose Add.
+
+A progress banner appears to let you know that ingestion has begun. This process can take 2 to 30 minutes, depending on the volume of data that you have uploaded.
+
+When the ingestion process has finished, a success banner appears. From the side navigation panel, choose Knowledge Bases.
+
+Select the checkbox next to the name of your data source. Then choose Sync.
+
+After a few minutes, a success banner appears, to confirm that the sync operation finished. Choose Test Knowledge Base.
+
+On the Test page, from the Retrieval and response generation section, choose Select model.
+
+In the Select model pop-up window, select a model provider, then a model. Choose Apply.
+
+Enter a simple prompt requesting information that is found in your data source. For this example, the prompt asks for a description of the differences between few-shot and zero-shot prompting. This topic is covered on pages 625 through 627 of the PDF provided for this demonstration. Use the send icon to submit the prompt.
+
+A response is generated. To understand how your selected model created the response, choose the Details link that follows the response.
+
+Now the Details panel is displayed, with information regarding how the response was generated. To close the test panel and return to the landing page for this Knowledge Base, choose Close.
+
+
+#Deleting Resources
+
+To begin, return to the Amazon Bedrock console. From the side navigation panel, choose Knowledge Bases.
+
+Select the radio button next to your Knowledge Base. Then, choose Delete.
+
+A Delete Knowledge Base pop-up window appears. Enter delete in the text box to confirm the operation. Then, choose Delete.
+
+A banner appears, to confirm that deletion of the Knowledge Base is in progress.
+
+When the deletion is complete, your Knowledge Base is no longer listed.
+
+Next, enter S3 in the console search box. From the search results, choose S3.
+
+Choose the name of the bucket that houses your Knowledge Base documents.
+
+Then, select the checkbox next to any documents that you want to remove. Choose Delete.
+
+In the confirmation text box, enter permanently delete. Then choose Delete objects.
+
+A success banner confirms that the document has been deleted.
+
