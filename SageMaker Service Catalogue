@@ -1,0 +1,1437 @@
+1. On the top navigation bar, review the Region selector to ensure that the Region is set to United States (N. Virginia).
+2. In the Services search box, type:
+
+lambda
+
+3. In the search results, under Services, click Lambda.
+4. Go to the next step.
+
+
+1. In the Functions section, click SageMakerBuild.
+2. Go to the next step.
+
+
+import json
+import boto3
+import requests
+import botocore
+import time
+import base64
+
+## Request Status ##
+global ReqStatus
+
+
+def CFTFailedResponse(event, status, message):
+    print("Inside CFTFailedResponse")
+    responseBody = {
+        'Status': status,
+        'Reason': message,
+        'PhysicalResourceId': event['ServiceToken'],
+        'StackId': event['StackId'],
+        'RequestId': event['RequestId'],
+        'LogicalResourceId': event['LogicalResourceId']
+    }
+	
+    headers={
+        'content-type':'',
+        'content-length':str(len(json.dumps(responseBody)))	 
+    }	
+    print('Response = ' + json.dumps(responseBody))
+    try:	
+        req=requests.put(event['ResponseURL'], data=json.dumps(responseBody),headers=headers)
+        print("delete_respond_cloudformation res "+str(req))		
+    except Exception as e:
+        print("Failed to send cf response {}".format(e))
+        
+def CFTSuccessResponse(event, status, data=None):
+    responseBody = {
+        'Status': status,
+        'Reason': 'See the details in CloudWatch Log Stream',
+        'PhysicalResourceId': event['ServiceToken'],
+        'StackId': event['StackId'],
+        'RequestId': event['RequestId'],
+        'LogicalResourceId': event['LogicalResourceId'],
+        'Data': data
+    }
+    headers={
+        'content-type':'',
+        'content-length':str(len(json.dumps(responseBody)))	 
+    }	
+    print('Response = ' + json.dumps(responseBody))
+    #print(event)
+    try:	
+        req=requests.put(event['ResponseURL'], data=json.dumps(responseBody),headers=headers)
+    except Exception as e:
+        print("Failed to send cf response {}".format(e))
+
+
+def lambda_handler(event, context):
+    ReqStatus = "SUCCESS"
+    print("Event:")
+    print(event)
+    client = boto3.client('sagemaker')
+    ec2client = boto3.client('ec2')
+    data = {}
+
+    if event['RequestType'] == 'Create':
+        try:
+            ## Value Intialization from CFT ##
+            project_name = event['ResourceProperties']['ProjectName']
+            kmsKeyId = event['ResourceProperties']['KmsKeyId']
+            Tags = event['ResourceProperties']['Tags']
+            env_name = event['ResourceProperties']['ENVName']
+            subnet_name = event['ResourceProperties']['Subnet']
+            security_group_name = event['ResourceProperties']['SecurityGroupName']
+
+            input_dict = {}
+            input_dict['NotebookInstanceName'] = event['ResourceProperties']['NotebookInstanceName']
+            input_dict['InstanceType'] = event['ResourceProperties']['NotebookInstanceType']
+            input_dict['Tags'] = event['ResourceProperties']['Tags']
+            input_dict['DirectInternetAccess'] = event['ResourceProperties']['DirectInternetAccess']
+            input_dict['RootAccess'] = event['ResourceProperties']['RootAccess']
+            input_dict['VolumeSizeInGB'] = int(event['ResourceProperties']['VolumeSizeInGB'])
+            input_dict['RoleArn'] = event['ResourceProperties']['RoleArn']
+            input_dict['LifecycleConfigName'] = event['ResourceProperties']['LifecycleConfigName']
+
+        except Exception as e:
+            print(e)
+            ReqStatus = "FAILED"
+            message = "Parameter Error: "+str(e)
+            CFTFailedResponse(event, "FAILED", message)
+        if ReqStatus == "FAILED":
+            return None;
+        print("Validating Environment name: "+env_name)
+        print("Subnet Id Fetching.....")
+        try:
+            ## Sagemaker Subnet ##
+            subnetName = env_name+"-ResourceSubnet"
+            print(subnetName)
+            response = ec2client.describe_subnets(
+                Filters=[
+                    {
+                        'Name': 'tag:Name',
+                        'Values': [
+                            subnet_name
+                        ]
+                    },
+                ]
+            )
+            #print(response)
+            subnetId = response['Subnets'][0]['SubnetId']
+            input_dict['SubnetId'] = subnetId
+            print("Desc sg done!!")
+        except Exception as e:
+            print(e)
+            ReqStatus = "FAILED"
+            message = " Project Name is invalid - Subnet Error: "+str(e)
+            CFTFailedResponse(event, "FAILED", message)
+        if ReqStatus == "FAILED":
+            return None;
+        ## Sagemaker Security group ##
+        print("Security GroupId Fetching.....")
+        try:
+            sgName = env_name+"-ResourceSG"
+            response = ec2client.describe_security_groups(
+                Filters=[
+                    {
+                        'Name': 'tag:Name',
+                        'Values': [
+                            security_group_name
+                        ]
+                    },
+                ]
+            )
+            sgId = response['SecurityGroups'][0]['GroupId']
+            input_dict['SecurityGroupIds'] = [sgId]
+            print("Desc sg done!!")
+        except Exception as e:
+            print(e)
+            ReqStatus = "FAILED"
+            message = "Security Group ID Error: "+str(e)
+            CFTFailedResponse(event, "FAILED", message)
+        if ReqStatus == "FAILED":
+            return None;    
+        try:
+            if kmsKeyId:
+                input_dict['KmsKeyId'] = kmsKeyId
+            else:
+                print("in else")
+                
+            print(input_dict)
+            instance = client.create_notebook_instance(**input_dict)
+            print('Sagemager CLI response')
+            print(str(instance))
+            responseData = {'NotebookInstanceArn': instance['NotebookInstanceArn']}
+            
+            NotebookStatus = 'Pending'
+            response = client.describe_notebook_instance(
+                NotebookInstanceName=event['ResourceProperties']['NotebookInstanceName']
+            )
+            NotebookStatus = response['NotebookInstanceStatus']
+            print("NotebookStatus:"+NotebookStatus)
+            
+            ## Notebook Failure ##
+            if NotebookStatus == 'Failed':
+                message = NotebookStatus+": "+response['FailureReason']+" :Notebook is not coming InService"
+                CFTFailedResponse(event, "FAILED", message)
+            else:
+                while NotebookStatus == 'Pending':
+                    time.sleep(200)
+                    response = client.describe_notebook_instance(
+                        NotebookInstanceName=event['ResourceProperties']['NotebookInstanceName']
+                    )
+                    NotebookStatus = response['NotebookInstanceStatus']
+                    print("NotebookStatus in loop:"+NotebookStatus)
+                
+                ## Notebook Success ##
+                if NotebookStatus == 'InService':
+                    data['Message'] = "SageMaker Notebook name - "+event['ResourceProperties']['NotebookInstanceName']+" created succesfully"
+                    print("message InService :",data['Message'])
+                    CFTSuccessResponse(event, "SUCCESS", data)
+                else:
+                    message = NotebookStatus+": "+response['FailureReason']+" :Notebook is not coming InService"
+                    print("message :",message)
+                    CFTFailedResponse(event, "FAILED", message)
+        except Exception as e:
+            print(e)
+            ReqStatus = "FAILED"
+            CFTFailedResponse(event, "FAILED", str(e))
+    if event['RequestType'] == 'Delete':
+        NotebookStatus = None
+        lifecycle_config = event['ResourceProperties']['LifecycleConfigName']
+        NotebookName = event['ResourceProperties']['NotebookInstanceName']
+
+        try:
+            response = client.describe_notebook_instance(
+                NotebookInstanceName=NotebookName
+            )
+            NotebookStatus = response['NotebookInstanceStatus']
+            print("Notebook Status - "+NotebookStatus)
+        except Exception as e:
+            print(e)
+            NotebookStatus = "Invalid"
+            #CFTFailedResponse(event, "FAILED", str(e))
+        while NotebookStatus == 'Pending':
+            time.sleep(30)
+            response = client.describe_notebook_instance(
+                NotebookInstanceName=NotebookName
+            )
+            NotebookStatus = response['NotebookInstanceStatus']
+            print("NotebookStatus:"+NotebookStatus)
+        if NotebookStatus != 'Failed' and NotebookStatus != 'Invalid' :
+            print("Delete request for Notebookk name: "+NotebookName)
+            print("Stoping the Notebook.....")
+            if NotebookStatus != 'Stopped':
+                try:
+                    response = client.stop_notebook_instance(
+                        NotebookInstanceName=NotebookName
+                    )
+                    NotebookStatus = 'Stopping'
+                    print("Notebook Status - "+NotebookStatus)
+                    while NotebookStatus == 'Stopping':
+                        time.sleep(30)
+                        response = client.describe_notebook_instance(
+                            NotebookInstanceName=NotebookName
+                        )
+                        NotebookStatus = response['NotebookInstanceStatus']
+                    print("NotebookStatus:"+NotebookStatus)
+                except Exception as e:
+                    print(e)
+                    NotebookStatus = "Invalid"
+                    CFTFailedResponse(event, "FAILED", str(e))
+                
+            else:
+                NotebookStatus = 'Stopped'
+                print("NotebookStatus:"+NotebookStatus)
+        
+        if NotebookStatus != 'Invalid':
+            print("Deleting The Notebook......")
+            time.sleep(5)
+            try:
+                response = client.delete_notebook_instance(
+                    NotebookInstanceName=NotebookName
+                )
+                print("Notebook Deleted")
+                data["Message"] = "Notebook Deleted"
+                CFTSuccessResponse(event, "SUCCESS", data)
+            except Exception as e:
+                print(e)
+                CFTFailedResponse(event, "FAILED", str(e))
+            
+        else:
+            print("Notebook Invalid status")
+            data["Message"] = "Notebook is not available"
+            CFTSuccessResponse(event, "SUCCESS", data)
+    
+    if event['RequestType'] == 'Update':
+        print("Update operation for Sagemaker Notebook is not recommended")
+        data["Message"] = "Update operation for Sagemaker Notebook is not recommended"
+        CFTSuccessResponse(event, "SUCCESS", data)
+
+
+1. In the Function overview section, under Function ARN, click to copy the ARN.
+2. Paste the SageMakerBuild function ARN in the text editor of your choice on your device.
+- You will use this value in a later step.
+
+arn:aws:lambda:us-east-1:460294627825:function:SageMakerBuild
+
+
+1. Navigate to the Amazon S3 console.
+
+- Remember, on the top navigation bar, you can use the Services search box (or click Services) to navigate to a different service console.
+
+2. On the General purpose buckets tab, click the bucket name that starts with template-files-bucket-.
+3. Go to the next step.
+
+
+1. On the Objects tab, choose the check box to select SC-template.yml.
+2. Click Copy URL to copy the S3 URL, and then paste it in your text editor.
+
+- You will use this value in a later step.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Template to create a SageMaker notebook
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Environment detail
+        Parameters:
+          - ENVName
+      - Label:
+          default: SageMaker Notebook configuration
+        Parameters:
+          - NotebookInstanceName
+          - NotebookInstanceType
+          - DirectInternetAccess
+          - RootAccess
+          - VolumeSizeInGB
+      - Label:
+          default: Load S3 Bucket to SageMaker
+        Parameters:
+          - S3CodePusher
+          - CodeBucketName
+      - Label:
+          default: Project detail
+        Parameters:
+          - ProjectName
+          - ProjectID
+    ParameterLabels:
+      DirectInternetAccess:
+        default: Default Internet Access
+      NotebookInstanceName:
+        default: Notebook Instance Name
+      NotebookInstanceType:
+        default: Notebook Instance Type
+      ENVName:
+        default: Environment Name
+      ProjectName:
+        default: Project Suffix
+      RootAccess:
+        default: Root access
+      VolumeSizeInGB:
+        default: Volume size for the SageMaker Notebook
+      ProjectID:
+        default: SageMaker ProjectID
+      CodeBucketName:
+        default: Code Bucket Name        
+      S3CodePusher:
+        default: Copy code from S3 to SageMaker
+Parameters:
+  SubnetName:
+    Default: ProSM-ResourceSubnet
+    Description: Subnet Random String
+    Type: String
+  SecurityGroupName:
+    Default: ProSM-ResourceSG
+    Description: Security Group Name
+    Type: String
+  SageMakerBuildFunctionARN:
+    Description: Service Token Value passed from Lambda Stack
+    Type: String
+  NotebookInstanceName:
+    AllowedPattern: '[A-Za-z0-9-]{1,63}'
+    ConstraintDescription: >-
+      Maximum of 63 alphanumeric characters. Can include hyphens (-), but not
+      spaces. Must be unique within your account in an AWS Region.
+    Description: SageMaker Notebook instance name
+    MaxLength: '63'
+    MinLength: '1'
+    Type: String
+  NotebookInstanceType:
+    ConstraintDescription: Must select a valid notebook instance type.
+    Default: ml.t3.medium
+    Description: Select Instance type for the SageMaker Notebook
+    Type: String
+  ENVName:
+    Description: SageMaker infrastructure naming convention
+    Type: String
+  ProjectName:
+    Description: >-
+      The suffix appended to all resources in the stack.  This will allow
+      multiple copies of the same stack to be created in the same account.
+    Type: String
+  RootAccess:
+    Description: Root access for the SageMaker Notebook user
+    AllowedValues:
+      - Enabled
+      - Disabled
+    Default: Enabled
+    Type: String
+  VolumeSizeInGB:
+    Description: >-
+      The size, in GB, of the ML storage volume to attach to the notebook
+      instance. The default value is 5 GB.
+    Type: Number
+    Default: '20'
+  DirectInternetAccess:
+    Description: >-
+      If you set this to Disabled this notebook instance will be able to access
+      resources only in your VPC. As per the Project requirement, we have
+      Disabled it.
+    Type: String
+    Default: Disabled
+    AllowedValues:
+      - Disabled
+    ConstraintDescription: Must select a valid notebook instance type.
+  ProjectID:
+    Type: String
+    Description: Enter a valid ProjectID.
+    Default: QuickStart007
+  S3CodePusher:
+    Description: Do you want to load the code from S3 to SageMaker Notebook
+    Default: 'NO'
+    AllowedValues:
+      - 'YES'
+      - 'NO'
+    Type: String
+  CodeBucketName:
+    Description: S3 Bucket name from which you want to copy the code to SageMaker.
+    Default: lab-materials-bucket-1234
+    Type: String    
+Conditions:
+  BucketCondition: !Equals 
+    - 'YES'
+    - !Ref S3CodePusher
+Resources:
+  SagemakerKMSKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      EnableKeyRotation: true
+      Tags:
+        - Key: ProjectID
+          Value: !Ref ProjectID
+        - Key: ProjectName
+          Value: !Ref ProjectName
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+          Action: 
+            - 'kms:Encrypt'
+            - 'kms:PutKeyPolicy' 
+            - 'kms:CreateKey' 
+            - 'kms:GetKeyRotationStatus' 
+            - 'kms:DeleteImportedKeyMaterial' 
+            - 'kms:GetKeyPolicy' 
+            - 'kms:UpdateCustomKeyStore' 
+            - 'kms:GenerateRandom' 
+            - 'kms:UpdateAlias'
+            - 'kms:ImportKeyMaterial'
+            - 'kms:ListRetirableGrants' 
+            - 'kms:CreateGrant' 
+            - 'kms:DeleteAlias'
+            - 'kms:RetireGrant'
+            - 'kms:ScheduleKeyDeletion' 
+            - 'kms:DisableKeyRotation' 
+            - 'kms:TagResource' 
+            - 'kms:CreateAlias' 
+            - 'kms:EnableKeyRotation' 
+            - 'kms:DisableKey'
+            - 'kms:ListResourceTags'
+            - 'kms:Verify' 
+            - 'kms:DeleteCustomKeyStore'
+            - 'kms:Sign' 
+            - 'kms:ListKeys'
+            - 'kms:ListGrants'
+            - 'kms:ListAliases' 
+            - 'kms:ReEncryptTo' 
+            - 'kms:UntagResource' 
+            - 'kms:GetParametersForImport'
+            - 'kms:ListKeyPolicies'
+            - 'kms:GenerateDataKeyPair'
+            - 'kms:GenerateDataKeyPairWithoutPlaintext' 
+            - 'kms:GetPublicKey' 
+            - 'kms:Decrypt' 
+            - 'kms:ReEncryptFrom'
+            - 'kms:DisconnectCustomKeyStore' 
+            - 'kms:DescribeKey'
+            - 'kms:GenerateDataKeyWithoutPlaintext'
+            - 'kms:DescribeCustomKeyStores' 
+            - 'kms:CreateCustomKeyStore'
+            - 'kms:EnableKey'
+            - 'kms:RevokeGrant'
+            - 'kms:UpdateKeyDescription' 
+            - 'kms:ConnectCustomKeyStore' 
+            - 'kms:CancelKeyDeletion' 
+            - 'kms:GenerateDataKey'
+          Resource:
+            - !Join 
+              - ''
+              - - 'arn:aws:kms:'
+                - !Ref 'AWS::Region'
+                - ':'
+                - !Ref 'AWS::AccountId'
+                - ':key/*'
+        - Sid: Allow access for Key Administrators
+          Effect: Allow
+          Principal:
+            AWS: 
+              - !GetAtt SageMakerExecutionRole.Arn
+          Action:
+            - 'kms:CreateAlias'
+            - 'kms:CreateKey'
+            - 'kms:CreateGrant' 
+            - 'kms:CreateCustomKeyStore'
+            - 'kms:DescribeKey'
+            - 'kms:DescribeCustomKeyStores'
+            - 'kms:EnableKey'
+            - 'kms:EnableKeyRotation'
+            - 'kms:ListKeys'
+            - 'kms:ListAliases'
+            - 'kms:ListKeyPolicies'
+            - 'kms:ListGrants'
+            - 'kms:ListRetirableGrants'
+            - 'kms:ListResourceTags'
+            - 'kms:PutKeyPolicy'
+            - 'kms:UpdateAlias'
+            - 'kms:UpdateKeyDescription'
+            - 'kms:UpdateCustomKeyStore'
+            - 'kms:RevokeGrant'
+            - 'kms:DisableKey'
+            - 'kms:DisableKeyRotation'
+            - 'kms:GetPublicKey'
+            - 'kms:GetKeyRotationStatus'
+            - 'kms:GetKeyPolicy'
+            - 'kms:GetParametersForImport'
+            - 'kms:DeleteCustomKeyStore'
+            - 'kms:DeleteImportedKeyMaterial'
+            - 'kms:DeleteAlias'
+            - 'kms:TagResource'
+            - 'kms:UntagResource'
+            - 'kms:ScheduleKeyDeletion'
+            - 'kms:CancelKeyDeletion'
+          Resource:
+            - !Join 
+              - ''
+              - - 'arn:aws:kms:'
+                - !Ref 'AWS::Region'
+                - ':'
+                - !Ref 'AWS::AccountId'
+                - ':key/*'
+        - Sid: Allow use of the key
+          Effect: Allow
+          Principal:
+            AWS: 
+              - !GetAtt SageMakerExecutionRole.Arn
+
+          Action:
+            - kms:Encrypt
+            - kms:Decrypt
+            - kms:ReEncryptTo
+            - kms:ReEncryptFrom
+            - kms:GenerateDataKeyPair
+            - kms:GenerateDataKeyPairWithoutPlaintext
+            - kms:GenerateDataKeyWithoutPlaintext
+            - kms:GenerateDataKey
+            - kms:DescribeKey
+          Resource:
+            - !Join 
+              - ''
+              - - 'arn:aws:kms:'
+                - !Ref 'AWS::Region'
+                - ':'
+                - !Ref 'AWS::AccountId'
+                - ':key/*'
+        - Sid: Allow attachment of persistent resources
+          Effect: Allow
+          Principal:
+            AWS: 
+              - !GetAtt SageMakerExecutionRole.Arn
+
+          Action:
+            - kms:CreateGrant
+            - kms:ListGrants
+            - kms:RevokeGrant
+          Resource:
+            - !Join 
+              - ''
+              - - 'arn:aws:kms:'
+                - !Ref 'AWS::Region'
+                - ':'
+                - !Ref 'AWS::AccountId'
+                - ':key/*'
+          Condition:
+            Bool:
+              kms:GrantIsForAWSResource: 'true'
+  KeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: 'alias/SageMaker-CMK-DS'
+      TargetKeyId:
+        Ref: SagemakerKMSKey
+  SageMakerExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Tags:
+        - Key: ProjectID
+          Value: !Ref ProjectID
+        - Key: ProjectName
+          Value: !Ref ProjectName
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: !Join 
+            - ''
+            - - !Ref ProjectName
+              - SageMakerExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'iam:ListRoles'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:iam::'
+                      - !Ref 'AWS::AccountId'
+                      - ':role/*'
+              - Sid: CloudArnResource
+                Effect: Allow
+                Action:
+                  - 'application-autoscaling:DeleteScalingPolicy'
+                  - 'application-autoscaling:DeleteScheduledAction'
+                  - 'application-autoscaling:DeregisterScalableTarget'
+                  - 'application-autoscaling:DescribeScalableTargets'
+                  - 'application-autoscaling:DescribeScalingActivities'
+                  - 'application-autoscaling:DescribeScalingPolicies'
+                  - 'application-autoscaling:DescribeScheduledActions'
+                  - 'application-autoscaling:PutScalingPolicy'
+                  - 'application-autoscaling:PutScheduledAction'
+                  - 'application-autoscaling:RegisterScalableTarget'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:autoscaling:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':*'
+              - Sid: ElasticArnResource
+                Effect: Allow
+                Action:
+                  - 'elastic-inference:Connect'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:elastic-inference:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':elastic-inference-accelerator/*'  
+              - Sid: SNSArnResource
+                Effect: Allow
+                Action:
+                  - 'sns:ListTopics'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:sns:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':*'
+              - Sid: logsArnResource
+                Effect: Allow
+                Action:
+                  - 'cloudwatch:DeleteAlarms'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:GetMetricData'
+                  - 'cloudwatch:GetMetricStatistics'
+                  - 'cloudwatch:ListMetrics'
+                  - 'cloudwatch:PutMetricAlarm'
+                  - 'cloudwatch:PutMetricData'
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:DescribeLogStreams'
+                  - 'logs:GetLogEvents'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:logs:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':log-group:/aws/lambda/*'
+              - Sid: KmsArnResource
+                Effect: Allow
+                Action:
+                  - 'kms:DescribeKey'
+                  - 'kms:ListAliases'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:kms:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':key/*'
+              - Sid: ECRArnResource
+                Effect: Allow
+                Action:
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:CreateRepository'
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:DescribeRepositories'
+                  - 'ecr:DescribeImageScanFindings'
+                  - 'ecr:DescribeRegistry'
+                  - 'ecr:DescribeImages'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:ecr:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':repository/*'
+              - Sid: EC2ArnResource
+                Effect: Allow
+                Action:        
+                  - 'ec2:CreateNetworkInterface'
+                  - 'ec2:CreateNetworkInterfacePermission'
+                  - 'ec2:DeleteNetworkInterface'
+                  - 'ec2:DeleteNetworkInterfacePermission'
+                  - 'ec2:DescribeDhcpOptions'
+                  - 'ec2:DescribeNetworkInterfaces'
+                  - 'ec2:DescribeRouteTables'
+                  - 'ec2:DescribeSecurityGroups'
+                  - 'ec2:DescribeSubnets'
+                  - 'ec2:DescribeVpcEndpoints'
+                  - 'ec2:DescribeVpcs'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:ec2:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':instance/*'
+              - Sid: S3ArnResource
+                Effect: Allow
+                Action: 
+                  - 's3:CreateBucket'
+                  - 's3:GetBucketLocation'
+                  - 's3:ListBucket'       
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:s3::'
+                      - ':*sagemaker*'                  
+              - Sid: LambdaInvokePermission
+                Effect: Allow
+                Action:
+                  - 'lambda:ListFunctions'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:lambda:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':function'
+                      - ':*'
+              - Effect: Allow
+                Action: 'sagemaker:InvokeEndpoint'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:sagemaker:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':notebook-instance-lifecycle-config/*'
+                Condition:
+                  StringEquals:
+                    'aws:PrincipalTag/ProjectID': !Ref ProjectID
+              - Effect: Allow
+                Action:
+                  - 'sagemaker:CreateTrainingJob'
+                  - 'sagemaker:CreateEndpoint'
+                  - 'sagemaker:CreateModel'
+                  - 'sagemaker:CreateEndpointConfig'
+                  - 'sagemaker:CreateHyperParameterTuningJob'
+                  - 'sagemaker:CreateTransformJob'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:sagemaker:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':notebook-instance-lifecycle-config/*'
+                Condition:
+                  StringEquals:
+                    'aws:PrincipalTag/ProjectID': !Ref ProjectID
+                  'ForAllValues:StringEquals':
+                    'aws:TagKeys':
+                      - Username
+              - Effect: Allow
+                Action:
+                  - 'sagemaker:DescribeTrainingJob'
+                  - 'sagemaker:DescribeEndpoint'
+                  - 'sagemaker:DescribeEndpointConfig'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:sagemaker:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':notebook-instance-lifecycle-config/*'
+                Condition:
+                  StringEquals:
+                    'aws:PrincipalTag/ProjectID': !Ref ProjectID
+              - Effect: Allow
+                Action:
+                  - 'sagemaker:DeleteTags'
+                  - 'sagemaker:ListTags'
+                  - 'sagemaker:DescribeNotebookInstance'
+                  - 'sagemaker:ListNotebookInstanceLifecycleConfigs'
+                  - 'sagemaker:DescribeModel'
+                  - 'sagemaker:ListTrainingJobs'
+                  - 'sagemaker:DescribeHyperParameterTuningJob'
+                  - 'sagemaker:UpdateEndpointWeightsAndCapacities'
+                  - 'sagemaker:ListHyperParameterTuningJobs'
+                  - 'sagemaker:ListEndpointConfigs'
+                  - 'sagemaker:DescribeNotebookInstanceLifecycleConfig'
+                  - 'sagemaker:ListTrainingJobsForHyperParameterTuningJob'
+                  - 'sagemaker:StopHyperParameterTuningJob'
+                  - 'sagemaker:DescribeEndpointConfig'
+                  - 'sagemaker:ListModels'
+                  - 'sagemaker:AddTags'
+                  - 'sagemaker:ListNotebookInstances'
+                  - 'sagemaker:StopTrainingJob'
+                  - 'sagemaker:ListEndpoints'
+                  - 'sagemaker:DeleteEndpoint'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:sagemaker:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':notebook-instance-lifecycle-config/*'
+                Condition:
+                  StringEquals:
+                    'aws:PrincipalTag/ProjectID': !Ref ProjectID
+              - Effect: Allow
+                Action:
+                  - 'ecr:SetRepositoryPolicy'
+                  - 'ecr:CompleteLayerUpload'
+                  - 'ecr:BatchDeleteImage'
+                  - 'ecr:UploadLayerPart'
+                  - 'ecr:DeleteRepositoryPolicy'
+                  - 'ecr:InitiateLayerUpload'
+                  - 'ecr:DeleteRepository'
+                  - 'ecr:PutImage'
+                Resource: 
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:ecr:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':repository/*sagemaker*'
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref SagemakerS3Bucket
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref SagemakerS3Bucket
+                      - /*
+                Condition:
+                  StringEquals:
+                    'aws:PrincipalTag/ProjectID': !Ref ProjectID
+              - Effect: Allow
+                Action: 'iam:PassRole'
+                Resource:
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:iam::'
+                      - !Ref 'AWS::AccountId'
+                      - ':role/*'
+                Condition:
+                  StringEquals:
+                    'iam:PassedToService': sagemaker.amazonaws.com
+  CodeBucketPolicy:
+    Type: 'AWS::IAM::Policy'
+    Condition: BucketCondition
+    Properties:
+      PolicyName: !Join 
+        - ''
+        - - !Ref ProjectName
+          - CodeBucketPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+            Resource:
+              - !Join 
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref CodeBucketName
+              - !Join 
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref CodeBucketName
+                  - '/*'
+      Roles:
+        - !Ref SageMakerExecutionRole
+  SagemakerS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: ProjectID
+          Value: !Ref ProjectID
+        - Key: ProjectName
+          Value: !Ref ProjectName
+  S3Policy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref SagemakerS3Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowAccessFromVPCEndpoint
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - 's3:Get*'
+              - 's3:Put*'
+              - 's3:List*'
+              - 's3:DeleteObject'
+            Resource:
+              - !Join 
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref SagemakerS3Bucket
+              - !Join 
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref SagemakerS3Bucket
+                  - '/*'
+            Condition:
+              StringEquals:
+                "aws:sourceVpce": "<PASTE S3 VPC ENDPOINT ID>"
+  EFSLifecycleConfig:
+    Type: 'AWS::SageMaker::NotebookInstanceLifecycleConfig'
+    Properties:
+      NotebookInstanceLifecycleConfigName: 'Provisioned-LC'
+      OnCreate:
+        - Content: !Base64 
+            'Fn::Join':
+              - ''
+              - - |
+                  #!/bin/bash 
+                - |
+                  aws configure set sts_regional_endpoints regional 
+                - yes | cp -rf ~/.aws/config /home/ec2-user/.aws/config
+      OnStart:
+        - Content: !Base64 
+            'Fn::Join':
+              - ''
+              - - |
+                  #!/bin/bash  
+                - |
+                  aws configure set sts_regional_endpoints regional 
+                - yes | cp -rf ~/.aws/config /home/ec2-user/.aws/config  
+  EFSLifecycleConfigForS3:
+    Type: 'AWS::SageMaker::NotebookInstanceLifecycleConfig'
+    Properties:
+      NotebookInstanceLifecycleConfigName: 'Provisioned-LC-S3'
+      OnCreate:
+        - Content: !Base64 
+            'Fn::Join':
+              - ''
+              - - |
+                  #!/bin/bash 
+                - |
+                  # Copy Content
+                - !Sub >
+                  aws s3 cp s3://${CodeBucketName} /home/ec2-user/SageMaker/ --recursive 
+                - |
+                  # Set sts endpoint
+                - >
+                  aws configure set sts_regional_endpoints regional 
+                - yes | cp -rf ~/.aws/config /home/ec2-user/.aws/config
+      OnStart:
+        - Content: !Base64 
+            'Fn::Join':
+              - ''
+              - - |
+                  #!/bin/bash  
+                - |
+                  aws configure set sts_regional_endpoints regional 
+                - yes | cp -rf ~/.aws/config /home/ec2-user/.aws/config  
+  SageMakerCustomResource:
+    Type: 'Custom::SageMakerCustomResource'
+    DependsOn: S3Policy
+    Properties:
+      ServiceToken: !Ref SageMakerBuildFunctionARN
+      NotebookInstanceName: !Ref NotebookInstanceName
+      NotebookInstanceType: !Ref NotebookInstanceType
+      KmsKeyId: !Ref SagemakerKMSKey
+      ENVName: !Join 
+        - ''
+        - - !Ref ENVName
+          - !Sub Subnet1Id
+      Subnet: !Ref SubnetName
+      SecurityGroupName: !Ref SecurityGroupName
+      ProjectName: !Ref ProjectName
+      RootAccess: !Ref RootAccess
+      VolumeSizeInGB: !Ref VolumeSizeInGB
+      LifecycleConfigName: !If [BucketCondition, !GetAtt EFSLifecycleConfigForS3.NotebookInstanceLifecycleConfigName, !GetAtt EFSLifecycleConfig.NotebookInstanceLifecycleConfigName]  
+      DirectInternetAccess: !Ref DirectInternetAccess
+      RoleArn: !GetAtt 
+        - SageMakerExecutionRole
+        - Arn
+      Tags:
+        - Key: ProjectID
+          Value: !Ref ProjectID
+        - Key: ProjectName
+          Value: !Ref ProjectName
+Outputs:
+  Message:
+    Description: Execution Status
+    Value: !GetAtt 
+      - SageMakerCustomResource
+      - Message
+  SagemakerKMSKey:
+    Description: KMS Key for encrypting Sagemaker resource
+    Value: !Ref KeyAlias
+  ExecutionRoleArn:
+    Description: ARN of the Sagemaker Execution Role
+    Value: !Ref SageMakerExecutionRole
+  S3BucketName:
+    Description: S3 bucket for SageMaker Notebook operation
+    Value: !Ref SagemakerS3Bucket
+  NotebookInstanceName:
+    Description: Name of the Sagemaker Notebook instance created
+    Value: !Ref NotebookInstanceName
+  ProjectName:
+    Description: Project ID used for SageMaker deployment
+    Value: !Ref ProjectName
+  ProjectID:
+    Description: Project ID used for SageMaker deployment
+    Value: !Ref ProjectID
+
+
+
+
+1. Navigate to the Amazon VPC console.
+2. In the left navigation pane, click Endpoints.
+3. In the Endpoints section, click Create endpoint.
+
+
+1. In the Endpoint settings section, for Name tag, type:
+
+s3-endpoint
+
+2. For Service category, keep the default setting of AWS services.
+3. Scroll down to the Services section.
+
+
+1. In the Services section search box, type:
+
+s3
+
+and press ENTER.
+
+2. Choose the radio button to select the service name that contains s3, and also is the type, Gateway.
+3. Scroll down to the Network settings section.
+
+
+1. In the VPC section, on the dropdown menu, choose LabVPC.
+2. In the Route tables section, choose the check box to select PrivateRouteTable.
+3. Scroll down to the bottom of the page and click Create endpoint (not shown).
+
+
+1. In the success alert, review the message.
+2. On the Details tab, under Status, review to ensure that the s3-endpoint status is Available.
+3. Click the copy icon to copy the VPC endpoint ID, and then paste it in your text editor.
+
+- You will use this value in a later step.
+
+vpce-04a7b1f4fcdab558c
+
+
+
+
+
+1. Navigate to the AWS Service Catalog console.
+2. In the left navigation pane, under Administration, click Portfolios.
+3. On the Local tab, click Create portfolio.
+
+1. In the Portfolio details section, for Portfolio name, type:
+
+SageMakerPortfolio
+
+2. For Owner, type:
+
+CQ
+
+3. Scroll down to the bottom of the page, and then click Create (not shown).
+
+
+1. In the success alert, review the message.
+2. On the Local tab, click SageMakerPortfolio.
+
+
+
+1. On the Products tab, click Create product.
+
+
+
+1. For Product type, keep the default setting of CloudFormation.
+2. For Product name, type:
+
+SageMakerProduct
+
+3. For Owner, type:
+
+CQ
+
+4. Scroll down to Version details.
+5. Go to the next step.
+
+
+1. For Version source, choose Specify a URL.
+2. For Use a CloudFormation template, paste the S3 URL that you copied in an earlier step.
+3. For Version name, type:
+
+1
+
+4. Scroll down to the bottom of the page, and then click Create product (not shown).
+
+- The next page takes a few seconds to load, so do NOT click Create product more than once.
+
+https://template-files-bucket-8a57a720.s3.us-east-1.amazonaws.com/SC-template.yml
+
+
+
+
+
+1. In the success alert, review the message.
+2. On the Products tab, review to see the product is now listed in the portfolio.
+3. Click the Constraints tab.
+
+
+1. In the success alert, review the message.
+2. On the Products tab, review to see the product is now listed in the portfolio.  (Refresh)
+3. Click the Constraints tab.
+
+
+
+1. On the Constraints tab, click Create constraint.
+
+
+
+1. In the Constraint details section, for Product, choose SageMakerProduct.
+2. For Constraint type, choose Launch.
+3. Scroll down to Launch constraint.
+
+
+1. For Method, choose Select IAM role.
+2. For IAM role, choose the role that starts with SCLaunchRole.
+3. Click Create.
+
+arn:aws:iam::460294627825:role/SCLaunchRole-8a57a720
+
+Permissions policies (6) Info
+
+Policy name 
+Type
+Attached entities
+
+AmazonS3FullAccess
+AWS managed
+1
+AWSCloudFormationFullAccess
+AWS managed
+1
+IAMFullAccess
+AWS managed
+1
+KMS
+Customer inline
+0
+SageMaker-Lifecycle
+Customer inline
+0
+SageMaker-SCLaunchPolicy
+Customer inline
+0
+
+
+1. In the success alert, review the message.
+2. On the Constraints tab, review the constraint.
+3. Click the Access tab.
+
+
+
+1. Click Grant access.
+
+
+
+1. For Select how to grant access, keep the default setting of IAM Principal.
+2. Click the Roles tab.
+3. In the Roles search box, type:
+
+SCEndUserRole
+
+4. Choose the check box to select SCEndUserRole.
+5. Copy the SCEndUserRole role name.
+6. Click Grant access.
+
+
+SCEndUserRole-8a57a720
+
+
+Policy name 
+Type
+Attached entities
+
+AWSServiceCatalogEndUserFullAccess
+AWS managed
+1
+
+SageMakerUserRolePolicy
+Customer inline
+0
+
+
+
+1. In the success alert, review the message.
+2. On the Access tab, review to see that SCEndUserRole was granted portfolio access.
+
+
+
+1. On the top navigation bar, click the username to expand the dropdown menu.
+2. On the dropdown menu, click the copy icon to copy the account ID.
+3. Click Switch role.
+
+
+460294627825
+
+
+
+
+
+1. For Account ID, paste the account ID that you just copied.
+2. For IAM role name, paste the SCEndUserRole you copied in previous step.
+3. For Display name, type:
+
+Data Scientist
+
+4. For Display color, choose a color of your choice.
+5. Click Switch Role.
+
+- If you see an Access denied error, you can safely ignore it.
+
+6. Go to the next step.
+
+
+
+1. Navigate to the AWS Service Catalog console.
+2. On the top navigation bar, review to see that the Data Scientist role is active.
+3. In the Products section, choose the radio button to select SageMakerProduct.
+4. Click Launch product.
+5. Go to the next step.
+
+
+
+1. For Provisioned product name, type:
+
+DataScientistProduct
+
+2. Scroll down to Parameters.
+3. Go to the next step.
+
+
+
+1. For Environment Name, type:
+
+DSEnv
+
+2. For Notebook Instance Name, type:
+
+DSnb
+
+3. Scroll down to SageMakerBuildFunctionARN.
+4. Go to the next step.
+
+
+
+
+
+1. For SageMakerBuildFunctionARN, paste the SageMakerBuild Lambda function ARN that you copied in an earlier step.
+2. Click Launch product.
+
+
+
+1. In the information alert, review the message.
+2. In the Resources section, review all the resources deployed from the CloudFormation template.
+
+- You can see the current status of the resources. The launch takes up to 10 minutes to be completed.
+
+
+
+1. In the Provisioned product details section, under Status, review the status of the provisioned product. 
+
+- The status has now changed to Available, which means that all the resources defined in the DataScientistProduct product are successfully deployed.
+
+
+
+1. Navigate to the Amazon SageMaker AI console.
+2. In the left navigation pane, under Applications and IDEs, click Notebooks.
+3. In the Notebook instances section, under Status, review to ensure that the SageMaker notebook instance status is InService.
+
+
+1. On the top navigation bar, click the username to expand the dropdown menu.
+2. On the dropdown menu, click Switch back.
+
+
+1. Navigate to the Amazon S3 console.
+2. On the General purpose buckets tab, click the bucket name that starts with sc-.
+
+
+1. Click the Permissions tab.
+2. In the Bucket policy section, click Edit.
+
+
+
+1. On line 20 of the bucket policy, replace the placeholder text by pasting the S3 VPC endpoint ID you copied in an earlier step.
+
+- This policy allows access to the specified bucket, because console requests originate from the specified VPC endpoint.
+
+2. Click Save changes.
+
+
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Sid": "AllowAccessFromVPCEndpoint",
+			"Effect": "Allow",
+			"Principal": "*",
+			"Action": [
+				"s3:Get*",
+				"s3:Put*",
+				"s3:List*",
+				"s3:DeleteObject"
+			],
+			"Resource": [
+				"arn:aws:s3:::sc-460294627825-pp-gwpkgyhwq3hpo-sagemakers3bucket-z4d8x8imxdis",
+				"arn:aws:s3:::sc-460294627825-pp-gwpkgyhwq3hpo-sagemakers3bucket-z4d8x8imxdis/*"
+			],
+			"Condition": {
+				"StringEquals": {
+					"aws:sourceVpce": "vpce-04a7b1f4fcdab558c"
+				}
+			}
+		}
+	]
+}
+
+
+
+
+
+1. Navigate to the Amazon ECR console.
+2. In the Repositories section, click sagemaker-repo.
+
+
+1. Click Permissions.
+2. Review the existing ECR policy for the sagemaker-repo repository.
+
+- You will create an ECR VPC endpoint in the DIY section. This policy is shown just for reference and does not need to be edited.
+
+
+
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowPull",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "aws:sourceVpce": "vpce-08404ca9d879b56d8"
+        }
+      }
+    }
+  ]
+}
+
+
+
+
+Create a VPC endpoint to restrict access to the ML model artifacts stored in Amazon ECR.
+Solution Validation Method
+Our test servers will confirm that the Amazon ECR VPC endpoint exists and is correctly configured.
+
+Hint:
+- Refer to the practice steps on how to create a VPC endpoint.
+- Use the following parameters when creating the endpoint:
+
+Service: com.amazonaws.us-east-1.ecr.api
+VPC: LabVPC
+Subnet AZ: us-east-1b
+Subnet: ProSM-ENISubnet
+Security group: ProSM-ENISG
+
